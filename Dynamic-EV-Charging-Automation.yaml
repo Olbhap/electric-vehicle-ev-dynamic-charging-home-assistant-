@@ -11,9 +11,7 @@ blueprint:
     - Improved oscillation prevention
     
     This automation dynamically adjusts the charging current of an electric vehicle (EV) based on the total power consumption in the household. 
-
     It ensures that the EV charger does not exceed the available power, preventing overloads and optimizing energy usage. The system continuously monitors home power consumption and regulates the charging rate accordingly. 
-
     You can configure two different charging periods (Day and Night) if your electricity contract has varying power limits at different times. 
   
     Depending on what you have exposed in Home Assistant you could target your car or your charger. Works with any EV charger that supports amperage control via Home Assistant. 
@@ -137,11 +135,9 @@ blueprint:
       default: 24
       selector:
         number: {min: 0, max: 24, step: 1}
-
 triggers:
   - trigger: time_pattern
     minutes: !input interval
-
 condition:
   - condition: and
     conditions:
@@ -166,6 +162,7 @@ action:
       charging_current_entity: !input charging_current
       sensor_charging_entity: !input sensor_charging
       charging_current_value: "{{ states(charging_current_entity) | float(0) }}"
+      sensor_unavailable: "{{ states(sensor_house_power_entity) in ['unavailable', 'unknown', 'none', ''] }}"
       total_consumption: "{{ states(sensor_house_power_entity) | float(0) }}"
       charger_consumption: |-
         {% set state = states(sensor_charging_entity) | lower %}
@@ -196,33 +193,44 @@ action:
         {% else %}
           {{ raw_amps | int }}
         {% endif %}
-
-  # Control del cargador usando switch (on/off)
-  - service: "switch.turn_{{ 'on' if actual_free_power / voltage >= min_amps else 'off' }}"
-    target:
-      entity_id: !input charger_toggle
-
-  - repeat:
-      while:
-        - condition: template
-          value_template: >-
-            {% set current_amps = states(charging_current_entity) | float %}
-            {% set diff = (current_amps - (new_target_value | float)) | abs %}
-            {{ diff >= 1 }}
-      sequence:
-        - service: number.set_value
-          target:
-            entity_id: !input charging_current
-          data:
-            value: >-
-              {% set current_amps = states(charging_current_entity) | float %}
-              {% if current_amps < (new_target_value | float) %}
-                {{ current_amps + 1 }}
-              {% elif current_amps > (new_target_value | float) %}
-                {{ [current_amps - 1, min_amps] | max }}
-              {% else %}
-                {{ new_target_value }}
-              {% endif %}
-        - delay:
-            seconds: 5
+  - choose:
+      # --- Fallback: power meter unreachable → charge at 10A ---
+      - conditions:
+          - condition: template
+            value_template: "{{ sensor_unavailable }}"
+        sequence:
+          - service: number.set_value
+            target:
+              entity_id: !input charging_current
+            data:
+              value: 10
+    # --- Normal operation ---
+    default:
+      # Control del cargador usando switch (on/off)
+      - service: "switch.turn_{{ 'on' if actual_free_power / voltage >= min_amps else 'off' }}"
+        target:
+          entity_id: !input charger_toggle
+      - repeat:
+          while:
+            - condition: template
+              value_template: >-
+                {% set current_amps = states(charging_current_entity) | float %}
+                {% set diff = (current_amps - (new_target_value | float)) | abs %}
+                {{ diff >= 1 }}
+          sequence:
+            - service: number.set_value
+              target:
+                entity_id: !input charging_current
+              data:
+                value: >-
+                  {% set current_amps = states(charging_current_entity) | float %}
+                  {% if current_amps < (new_target_value | float) %}
+                    {{ current_amps + 1 }}
+                  {% elif current_amps > (new_target_value | float) %}
+                    {{ [current_amps - 1, min_amps] | max }}
+                  {% else %}
+                    {{ new_target_value }}
+                  {% endif %}
+            - delay:
+                seconds: 5
 mode: restart
